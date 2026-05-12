@@ -44,3 +44,11 @@ htmlcov/
 # Modelos serializados (regenerables)
 *.pkl
 *.joblib
+backend/app/ml/model.json
+
+# BD local (regenerable)
+*.db
+*.sqlite
+
+# Streamlit
+.streamlit/secrets.toml
