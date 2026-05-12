@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: riesgo-backend
+    runtime: docker
+    rootDir: backend
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: ENV
+        value: prod
+      - key: DATABASE_URL
+        value: sqlite:////data/risk.db
+      - key: CACHE_TTL_MINUTES
+        value: "1440"
+      - key: FRED_API_KEY
+        sync: false
+    disk:
+      name: risk-data
+      mountPath: /data
+      sizeGB: 1

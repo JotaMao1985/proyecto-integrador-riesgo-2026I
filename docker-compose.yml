@@ -1,0 +1,20 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: riesgo-backend
+    ports:
+      - "8000:8000"
+    environment:
+      ENV: dev
+      DATABASE_URL: sqlite:////data/risk.db
+      FRED_API_KEY: ${FRED_API_KEY:-}
+      CACHE_TTL_MINUTES: "1440"
+      LOG_LEVEL: INFO
+    volumes:
+      - risk_data:/data
+    restart: unless-stopped
+
+volumes:
+  risk_data:
