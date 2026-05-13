@@ -1,4 +1,11 @@
-"""Datos macro desde FRED: Rf y curva de tesoros."""
+"""Datos macro desde FRED: Rf (tasa libre de riesgo) y curva de tesoros.
+
+Material curricular:
+- M13 (ML/integracion APIs): cliente HTTP `requests` + tenacity para retry,
+  exception wrapper que evita filtrar `api_key` en logs.
+- M5 (Pydantic settings): `settings.fred_api_key` viene de `.env`.
+- M7 (Renta fija): la curva de tesoros alimenta Nelson-Siegel y duracion/convexidad.
+"""
 from __future__ import annotations
 
 import logging
@@ -71,7 +78,11 @@ def _fred_fetch_raw(series_id: str) -> dict[str, Any]:
 
 
 def fetch_fred_latest(series_id: str) -> float | None:
-    """Obtiene el ultimo valor numerico no vacio de una serie de FRED."""
+    """Obtiene el ultimo valor numerico no vacio de una serie de FRED.
+
+    M13: integracion API externa con retry. FRED entrega porcentajes en %
+    (ej. "4.52"); aqui se convierten a decimal (0.0452).
+    """
     if not settings.fred_api_key:
         logger.info("FRED_API_KEY vacia; uso fallback")
         return None
@@ -91,7 +102,7 @@ def fetch_fred_latest(series_id: str) -> float | None:
 
 
 def get_rf_annual() -> tuple[float, str]:
-    """Devuelve (rf_anual, fuente)."""
+    """Devuelve `(rf_anual, fuente)`. Soporta CAPM (M4) y descuento bonos (M7)."""
     rf = fetch_fred_latest(RF_SERIES)
     if rf is None:
         return RF_FALLBACK, "fallback_static"
@@ -104,7 +115,11 @@ def get_rf_daily() -> float:
 
 
 def fetch_yield_curve() -> tuple[list[float], list[float], str]:
-    """Devuelve (vencimientos, rendimientos_decimal, fuente)."""
+    """Devuelve `(vencimientos, rendimientos_decimal, fuente)`.
+
+    Datos para Nelson-Siegel (M7 renta fija): 6 puntos de la curva US Treasury
+    (3M, 1Y, 2Y, 5Y, 10Y, 30Y). Fallback estatico si FRED no responde.
+    """
     mats: list[float] = []
     ylds: list[float] = []
     used_fallback = False

@@ -80,6 +80,70 @@ class TestCacheStates:
         assert data_mod.CACHE_STATS["AAPL"]["stale"] == 1
 
 
+class TestsPedagogicos:
+    """Tests didacticos del patron 'cache transparente' (T1.4).
+
+    Pensados para mostrar en clase: cada uno verifica un escenario clave
+    con prosa explicativa y un comentario `# Pedagogia:` arriba del assert
+    central. No son redundantes con los tests anteriores — son la version
+    explicativa para el modulo M13 del syllabus.
+    """
+
+    def test_cache_cold_then_warm(
+        self, test_db, seed_synthetic, force_hit, monkeypatch
+    ):
+        """Cache COLD -> WARM: primera llamada MISS, segunda HIT.
+
+        El cache empieza vacio para un activo nuevo. La primera llamada
+        registra MISS y dispara refresh; al insertarse precios, la siguiente
+        llamada al mismo ticker dentro del TTL registra HIT.
+        """
+        from app.models.db_models import Asset, Price
+
+        test_db.add(Asset(ticker="NEW", name="New Co", sector="Tech"))
+        test_db.commit()
+
+        # Stub del refresh: simula que yfinance insert una fila al refrescar.
+        def fake_refresh(db, ticker, start, end):
+            db.add(Price(ticker=ticker, date=date.today(), close=100.0, volume=0))
+            db.commit()
+            return 1
+
+        monkeypatch.setattr(data_mod, "_refresh_from_yfinance", fake_refresh)
+
+        data_mod.get_prices(test_db, "NEW", auto_fetch=True)
+        # Pedagogia: la primera llamada encuentra la tabla vacia para NEW.
+        assert data_mod.CACHE_STATS["NEW"]["miss"] == 1
+
+        data_mod.get_prices(test_db, "NEW", auto_fetch=True)
+        # Pedagogia: la segunda llamada encuentra el precio recien insertado.
+        assert data_mod.CACHE_STATS["NEW"]["hit"] == 1
+
+    def test_cache_stale_triggers_refresh(
+        self, test_db, seed_synthetic, monkeypatch
+    ):
+        """TTL expirado fuerza un refresh aunque haya datos en BD.
+
+        Cambiamos `cache_ttl_minutes` a 1 minuto: como el seed sintetico
+        ubica el ultimo precio en `date.today() - 1 dia`, el cache se
+        considera STALE y `get_prices` invoca un refresh.
+        """
+        monkeypatch.setattr(settings, "cache_ttl_minutes", 1)
+
+        call_count = {"n": 0}
+
+        def spy(*args, **kwargs):
+            call_count["n"] += 1
+            return 0
+
+        monkeypatch.setattr(data_mod, "_refresh_from_yfinance", spy)
+
+        data_mod.get_prices(test_db, "AAPL", auto_fetch=True)
+        # Pedagogia: STALE no es "no hay datos"; es "los que hay ya expiraron".
+        assert data_mod.CACHE_STATS["AAPL"]["stale"] == 1
+        assert call_count["n"] == 1
+
+
 class TestRefreshInvariant:
     """Verifica el contrato del cache transparente: refresh solo si MISS/STALE."""
 

@@ -1,16 +1,18 @@
 """Servicio de datos: yfinance + cache transparente en SQLite.
 
+Material curricular ejercido:
+- M9 (SQLAlchemy): `select`, `Session`, `commit`, queries por ticker.
+- M6 (FastAPI): se inyecta como dependencia desde los routers via `Depends(get_db)`.
+- M13 (ML en produccion / integracion APIs): cache transparente, retry con
+  tenacity, circuit breaker en memoria.
+
 Resiliencia (T1.2): yfinance.download tiene retry exponencial (3 intentos)
 y un circuit breaker en memoria que se abre tras 3 invocaciones con retries
-agotados por ticker y se mantiene abierto durante 5 minutos. Una invocacion
-fallida ya implica 3 reintentos absorbidos por tenacity, asi que el "fallo"
-contado contra el umbral es post-retry.
+agotados por ticker y se mantiene abierto durante 5 minutos.
 
-El estado del circuit (`_circuit_state`) es modulo-level y no usa lock. Es
-aceptable bajo Render free-tier (1 worker uvicorn, threadpool por defecto):
-el peor caso de carrera read-modify-write es perder un incremento. Si en
-algun momento se escala a multi-worker o gunicorn, mover el estado a Redis
-o anadir `threading.Lock`.
+El estado del circuit (`_circuit_state`) y `CACHE_STATS` son modulo-level sin
+lock. Aceptable bajo Render free-tier (1 worker uvicorn, threadpool por
+defecto): el peor caso de carrera read-modify-write es perder un incremento.
 """
 from __future__ import annotations
 
@@ -89,7 +91,11 @@ def _circuit_reset(ticker: str) -> None:
 
 
 def seed_assets_if_empty(db: Session) -> int:
-    """Inserta los 5 activos seed si la tabla esta vacia. Idempotente."""
+    """Inserta los 5 activos seed si la tabla esta vacia. Idempotente.
+
+    Patron M9: chequear estado con `db.scalar(select(...).limit(1))` antes
+    de escribir. Mas eficiente que `count(*)` y suficiente para "esta vacio".
+    """
     existing = db.scalar(select(Asset).limit(1))
     if existing is not None:
         return 0
@@ -104,6 +110,7 @@ def seed_assets_if_empty(db: Session) -> int:
 
 
 def list_assets(db: Session) -> list[Asset]:
+    """Lista todos los activos ordenados por ticker (M9: ORM `scalars + select`)."""
     return list(db.scalars(select(Asset).order_by(Asset.ticker)))
 
 
