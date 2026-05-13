@@ -14,7 +14,7 @@ router = APIRouter(tags=["riesgo"])
 
 @router.get("/capm", response_model=CapmOut)
 async def capm(db: Session = Depends(get_db)) -> CapmOut:
-    mkt = get_prices(db, BENCHMARK_TICKER)
+    mkt = get_prices(db, BENCHMARK_TICKER, validate_ticker=False)
     if mkt.empty:
         raise HTTPException(status_code=503, detail=f"Benchmark {BENCHMARK_TICKER} sin datos")
     rm = log_returns(mkt["close"])
@@ -22,7 +22,7 @@ async def capm(db: Session = Depends(get_db)) -> CapmOut:
 
     results: list[CapmResult] = []
     for asset in list_assets(db):
-        df = get_prices(db, asset.ticker)
+        df = get_prices(db, asset.ticker, validate_ticker=False)
         if df.empty:
             continue
         ra = log_returns(df["close"])

@@ -45,6 +45,21 @@ SEED_ASSETS: list[dict[str, str]] = [
 BENCHMARK_TICKER = "SPY"
 
 
+class TickerNotFoundError(ValueError):
+    """Ticker no registrado en la tabla `assets`. Se mapea a HTTP 404."""
+
+
+# Observabilidad del cache (T1.3): por ticker, conteo de HIT / MISS / STALE.
+# Modulo-level dict; igual que `_circuit_state`, asume 1 worker.
+# Bajo el GIL de CPython las ops `dict[k] += 1` son efectivamente atomicas.
+CACHE_STATS: dict[str, dict[str, int]] = {}
+
+
+def reset_cache_stats() -> None:
+    """Limpia los contadores. Pensado para tests."""
+    CACHE_STATS.clear()
+
+
 _circuit_state: dict[str, tuple[int, datetime]] = {}
 _CIRCUIT_THRESHOLD = 3
 _CIRCUIT_COOLDOWN = timedelta(minutes=5)
@@ -92,6 +107,55 @@ def list_assets(db: Session) -> list[Asset]:
     return list(db.scalars(select(Asset).order_by(Asset.ticker)))
 
 
+def _ticker_exists(db: Session, ticker: str) -> bool:
+    """True si el ticker esta registrado en la tabla `assets`."""
+    return (
+        db.scalar(select(Asset.ticker).where(Asset.ticker == ticker.upper()).limit(1))
+        is not None
+    )
+
+
+def _cache_state(db: Session, ticker: str) -> tuple[str, float | None]:
+    """Determina el estado del cache para `ticker`.
+
+    Retorna `(state, ttl_remaining_min)`:
+    - `("MISS", None)`: no hay precios en BD.
+    - `("STALE", 0.0)`: hay precios pero el ultimo punto excede el TTL.
+    - `("HIT", remaining_min)`: dentro del TTL; `remaining_min` indica minutos
+      restantes antes de expirar.
+    """
+    last = db.scalar(
+        select(Price.date).where(Price.ticker == ticker).order_by(Price.date.desc())
+    )
+    if last is None:
+        return "MISS", None
+    ttl = timedelta(minutes=settings.cache_ttl_minutes)
+    last_dt = datetime.combine(last, datetime.min.time(), tzinfo=timezone.utc)
+    elapsed = datetime.now(timezone.utc) - last_dt
+    if elapsed > ttl:
+        return "STALE", 0.0
+    remaining_min = (ttl - elapsed).total_seconds() / 60.0
+    return "HIT", remaining_min
+
+
+def _record_cache_state(
+    ticker: str, state: str, ttl_remaining_min: float | None
+) -> None:
+    stats = CACHE_STATS.setdefault(ticker, {"hit": 0, "miss": 0, "stale": 0})
+    stats[state.lower()] += 1
+    # Log en DEBUG: a 1 req/s saturaria los logs de Render free-tier.
+    # La fotografia agregada esta en GET /health/cache.
+    if ttl_remaining_min is not None:
+        logger.debug(
+            "cache state=%s ticker=%s ttl_remaining_min=%.1f",
+            state,
+            ticker,
+            ttl_remaining_min,
+        )
+    else:
+        logger.debug("cache state=%s ticker=%s", state, ticker)
+
+
 def get_prices(
     db: Session,
     ticker: str,
@@ -99,31 +163,32 @@ def get_prices(
     start: date | None = None,
     end: date | None = None,
     auto_fetch: bool = True,
+    validate_ticker: bool = True,
 ) -> pd.DataFrame:
     """Devuelve precios desde BD; rellena con yfinance si el cache es stale.
 
-    Cache transparente: si la fecha mas reciente en BD es anterior al TTL,
-    invoca yfinance para refrescar y persiste los nuevos puntos.
+    Cache transparente con 3 estados observables (HIT/MISS/STALE) registrados
+    en `CACHE_STATS`. Levanta `TickerNotFoundError` si el ticker no esta en la
+    tabla `assets`; el handler global en `main.py` lo mapea a HTTP 404.
+
+    `validate_ticker=False` evita la query extra cuando el caller ya itero
+    sobre `list_assets()` (ej. routers de portafolio: capm, frontera, var,
+    stress, alertas).
     """
     ticker = ticker.upper()
+    if validate_ticker and not _ticker_exists(db, ticker):
+        raise TickerNotFoundError(f"ticker={ticker} not in assets table")
+
     end = end or date.today()
     start = start or (end - timedelta(days=365 * 2 + 30))
 
-    if auto_fetch and _is_cache_stale(db, ticker, end):
+    state, ttl_remaining = _cache_state(db, ticker)
+    _record_cache_state(ticker, state, ttl_remaining)
+
+    if auto_fetch and state in ("MISS", "STALE"):
         _refresh_from_yfinance(db, ticker, start, end)
 
     return _read_prices_df(db, ticker, start, end)
-
-
-def _is_cache_stale(db: Session, ticker: str, end: date) -> bool:
-    last = db.scalar(
-        select(Price.date).where(Price.ticker == ticker).order_by(Price.date.desc())
-    )
-    if last is None:
-        return True
-    ttl = timedelta(minutes=settings.cache_ttl_minutes)
-    last_dt = datetime.combine(last, datetime.min.time(), tzinfo=timezone.utc)
-    return (datetime.now(timezone.utc) - last_dt) > ttl
 
 
 def _yfinance_download_raw(

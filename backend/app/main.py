@@ -4,12 +4,14 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.config import settings
 from app.database import SessionLocal, create_all
 from app.ml import predictor as ml_predictor
+from app.services.data import TickerNotFoundError
 from app.routers import (
     activos,
     alertas,
@@ -80,6 +82,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(TickerNotFoundError)
+async def _ticker_not_found_to_404(
+    _request: Request, exc: TickerNotFoundError
+) -> JSONResponse:
+    """Mapea TickerNotFoundError (subclase de ValueError) a HTTP 404."""
+    return JSONResponse(status_code=404, content={"detail": str(exc)})
 
 
 app.include_router(health.router)

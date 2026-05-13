@@ -29,7 +29,7 @@ async def alertas(
     )
     all_signals = []
     for asset in list_assets(db):
-        df = get_prices(db, asset.ticker)
+        df = get_prices(db, asset.ticker, validate_ticker=False)
         if df.empty:
             continue
         sigs = detect_signals(asset.ticker, df["close"], thresholds=th)
