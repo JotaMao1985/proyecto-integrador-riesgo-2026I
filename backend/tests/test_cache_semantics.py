@@ -13,15 +13,6 @@ from app.config import settings
 from app.services import data as data_mod
 
 
-@pytest.fixture(autouse=True)
-def _reset_cache_state():
-    data_mod.reset_cache_stats()
-    data_mod._circuit_state.clear()
-    yield
-    data_mod.reset_cache_stats()
-    data_mod._circuit_state.clear()
-
-
 @pytest.fixture
 def no_yfinance(monkeypatch):
     """Evita que get_prices intente refrescar desde yfinance en estos tests."""

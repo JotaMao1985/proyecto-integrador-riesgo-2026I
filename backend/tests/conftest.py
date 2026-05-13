@@ -19,6 +19,18 @@ from app.main import app
 from app.models.db_models import Asset, Price
 
 
+@pytest.fixture(autouse=True)
+def _reset_data_module_state():
+    """Aisla el estado modulo-level de `services.data` entre tests."""
+    from app.services import data as data_mod
+
+    data_mod._circuit_state.clear()
+    data_mod.reset_cache_stats()
+    yield
+    data_mod._circuit_state.clear()
+    data_mod.reset_cache_stats()
+
+
 @pytest.fixture(scope="function")
 def test_db():
     """BD SQLite en memoria, una por test (aislamiento estricto)."""

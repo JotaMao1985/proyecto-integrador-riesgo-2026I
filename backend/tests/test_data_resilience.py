@@ -14,14 +14,6 @@ from tenacity import wait_none
 from app.services import data as data_mod
 
 
-@pytest.fixture(autouse=True)
-def _reset_circuit_state():
-    """Aisla el estado del circuit breaker entre tests."""
-    data_mod._circuit_state.clear()
-    yield
-    data_mod._circuit_state.clear()
-
-
 @pytest.fixture
 def no_wait(monkeypatch):
     """Desactiva el backoff exponencial para que los tests sean rapidos."""

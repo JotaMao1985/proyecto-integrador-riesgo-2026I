@@ -238,9 +238,24 @@ def _yfinance_download_with_retry(
     return _yfinance_download_raw(ticker, start, end)
 
 
-def _refresh_from_yfinance(db: Session, ticker: str, start: date, end: date) -> int:
+def _refresh_from_yfinance(
+    db: Session,
+    ticker: str,
+    start: date,
+    end: date,
+    *,
+    raise_on_error: bool = False,
+) -> int:
+    """Refresca precios desde yfinance. Retorna numero de filas nuevas.
+
+    Por defecto absorbe fallos (retorna 0 para no afectar el path de
+    `get_prices`). `raise_on_error=True` los propaga; util para `seed_history`
+    que necesita distinguir exito de fallo.
+    """
     if _circuit_open(ticker):
         logger.info("circuit OPEN ticker=%s skip fetch", ticker)
+        if raise_on_error:
+            raise RuntimeError(f"circuit OPEN for ticker={ticker}")
         return 0
 
     try:
@@ -248,6 +263,8 @@ def _refresh_from_yfinance(db: Session, ticker: str, start: date, end: date) -> 
     except Exception as exc:
         _circuit_record_failure(ticker)
         logger.warning("yfinance fallo tras retries ticker=%s err=%s", ticker, exc)
+        if raise_on_error:
+            raise
         return 0
 
     if df is None:
