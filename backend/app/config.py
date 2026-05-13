@@ -1,7 +1,7 @@
 """Configuracion via BaseSettings + .env (Semana 6 del curso)."""
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -26,6 +26,18 @@ class Settings(BaseSettings):
 
     ml_model_path: str = Field(default="app/ml/model.joblib")
     ml_default_ticker: str = Field(default="AAPL")
+
+    # CORS: CSV de origenes permitidos. "*" abre todo (solo recomendado en dev).
+    cors_origins: list[str] = Field(default_factory=lambda: ["*"])
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def _parse_cors_csv(cls, v: object) -> object:
+        """Permite leer 'a,b,c' desde .env como lista."""
+        if isinstance(v, str):
+            items = [s.strip() for s in v.split(",") if s.strip()]
+            return items or ["*"]
+        return v
 
 
 @lru_cache

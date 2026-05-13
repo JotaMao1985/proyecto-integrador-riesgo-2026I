@@ -24,8 +24,12 @@ def ewma_volatility(returns: pd.Series, lam: float = 0.94) -> pd.Series:
 def fit_garch_family(
     returns: pd.Series, model_names: list[str] | None = None
 ) -> list[dict]:
-    """Ajusta GARCH(1,1), EGARCH(1,1), GJR-GARCH(1,1). Devuelve lista AIC/BIC/sigma_t."""
-    model_names = model_names or ["GARCH", "EGARCH", "GJR"]
+    """Ajusta ARCH(1), GARCH(1,1), EGARCH(1,1), GJR-GARCH(1,1).
+
+    Devuelve lista con AIC/BIC/sigma_t por modelo. Spec CIII exige ARCH(1) puro
+    ademas de los modelos con persistencia (GARCH) y asimetria (EGARCH/GJR).
+    """
+    model_names = model_names or ["ARCH", "GARCH", "EGARCH", "GJR"]
 
     try:
         from arch import arch_model
@@ -41,7 +45,10 @@ def fit_garch_family(
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                if name == "GARCH":
+                if name == "ARCH":
+                    # ARCH(1) puro: solo el termino de innovacion al cuadrado.
+                    am = arch_model(r, mean="Zero", vol="ARCH", p=1, dist="normal")
+                elif name == "GARCH":
                     am = arch_model(r, mean="Zero", vol="Garch", p=1, q=1, dist="normal")
                 elif name == "EGARCH":
                     am = arch_model(r, mean="Zero", vol="EGARCH", p=1, q=1, dist="normal")

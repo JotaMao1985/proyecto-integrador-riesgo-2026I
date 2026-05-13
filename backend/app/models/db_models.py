@@ -1,5 +1,5 @@
-"""Modelos ORM (Semana 9): Asset, Price, Portfolio, PredictionLog."""
-from datetime import date, datetime
+"""Modelos ORM: Asset, Price, Portfolio, PredictionLog, SignalLog."""
+from datetime import date, datetime, timezone
 
 from sqlalchemy import (
     JSON,
@@ -41,7 +41,9 @@ class Price(Base):
     date: Mapped[date] = mapped_column(Date, index=True)
     close: Mapped[float] = mapped_column(Float)
     volume: Mapped[float] = mapped_column(Float, default=0.0)
-    fetched_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    fetched_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
 
     asset: Mapped["Asset"] = relationship(back_populates="prices")
 
@@ -54,18 +56,41 @@ class Portfolio(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(128), index=True)
     holdings: Mapped[dict] = mapped_column(JSON)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
 
 
 class PredictionLog(Base):
-    """Log de cada llamada a /predict (criterio 11 de la rubrica)."""
+    """Log de cada llamada a /predict (criterio 11 de la rubrica).
+
+    Nombres alineados con spec CIII: `input_features`, `timestamp`, `actual`.
+    El campo `actual` es nullable para back-fill posterior (monitoreo de drift).
+    """
 
     __tablename__ = "prediction_log"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     ticker: Mapped[str] = mapped_column(String(16), index=True)
-    features: Mapped[dict] = mapped_column(JSON)
+    input_features: Mapped[dict] = mapped_column(JSON)
     prediction: Mapped[int] = mapped_column(Integer)
     probability: Mapped[float] = mapped_column(Float)
+    actual: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
     model_version: Mapped[str] = mapped_column(String(32))
-    ts: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc), index=True
+    )
+
+
+class SignalLog(Base):
+    """Persistencia de senales tecnicas detectadas por /alertas (criterio 1)."""
+
+    __tablename__ = "signals_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc), index=True
+    )
+    ticker: Mapped[str] = mapped_column(String(16), index=True)
+    rule: Mapped[str] = mapped_column(String(50))
+    value: Mapped[float] = mapped_column(Float, default=0.0)

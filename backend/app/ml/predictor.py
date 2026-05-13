@@ -7,7 +7,7 @@ una sola vez en la salida.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +26,7 @@ class Predictor:
         self.metadata = metadata
         self.model_version = metadata.get("model_version", "unknown")
         self.features = metadata.get("features", [])
-        self.loaded_at = datetime.utcnow()
+        self.loaded_at = datetime.now(timezone.utc)
 
     def predict(self, X: "pd.DataFrame") -> tuple[int, float]:
         """Devuelve (clase, probabilidad_clase_positiva)."""

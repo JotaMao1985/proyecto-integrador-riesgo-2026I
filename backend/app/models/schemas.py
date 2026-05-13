@@ -70,7 +70,9 @@ class IndicatorsOut(BaseModel):
 class VolatilityRequest(BaseModel):
     ticker: str
     ewma_lambda: float = Field(default=0.94, gt=0.5, lt=1.0)
-    garch_models: list[str] = Field(default_factory=lambda: ["GARCH", "EGARCH", "GJR"])
+    garch_models: list[str] = Field(
+        default_factory=lambda: ["ARCH", "GARCH", "EGARCH", "GJR"]
+    )
 
     @field_validator("ticker")
     @classmethod
@@ -156,6 +158,7 @@ class FrontierRequest(BaseModel):
     target_returns: list[float] | None = None
     non_negative: bool = True
     n_points: int = Field(default=30, ge=5, le=200)
+    n_random: int = Field(default=10000, ge=0, le=50000)
 
     @field_validator("tickers")
     @classmethod
@@ -170,11 +173,20 @@ class PortfolioPoint(BaseModel):
     weights: dict[str, float]
 
 
+class RandomPortfolioPoint(BaseModel):
+    """Punto de la nube Monte Carlo (sin pesos para no inflar la respuesta)."""
+
+    ret: float
+    vol: float
+    sharpe: float
+
+
 class FrontierOut(BaseModel):
     non_negative: bool
     points: list[PortfolioPoint]
     min_var: PortfolioPoint
     max_sharpe: PortfolioPoint
+    simulated: list[RandomPortfolioPoint] = Field(default_factory=list)
 
 
 # ---------- Portafolios (CRUD) ----------
@@ -271,7 +283,13 @@ class OptionOut(BaseModel):
 class StressRequest(BaseModel):
     weights: dict[str, float]
     scenarios: list[str] = Field(
-        default_factory=lambda: ["rate_shock", "market_crash", "vol_spike", "combined"]
+        default_factory=lambda: [
+            "rate_shock",
+            "market_crash_20",
+            "market_crash_30",
+            "vol_spike",
+            "combined",
+        ]
     )
 
     @field_validator("weights")
@@ -288,6 +306,7 @@ class ScenarioResult(BaseModel):
     var_base: float
     var_stressed: float
     portfolio_loss: float
+    sensitivity_by_asset: dict[str, float]
 
 
 class StressOut(BaseModel):
@@ -335,12 +354,22 @@ class PredictRequest(BaseModel):
 
 
 class PredictOut(BaseModel):
+    log_id: int
     ticker: str
     prediction: int = Field(description="1 = sube, 0 = baja/igual")
     probability: float
     model_version: str
     features_used: list[str]
-    ts: datetime
+    timestamp: datetime
+
+
+class ActualUpdate(BaseModel):
+    """Back-fill del valor real observado para una prediccion ya registrada.
+
+    Habilita monitoreo de drift (criterio 11 ★★ + bonificacion).
+    """
+
+    actual: float = Field(description="Valor real observado (1=subio, 0=bajo, o continuo)")
 
 
 # ---------- Health ----------

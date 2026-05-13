@@ -1,4 +1,8 @@
-"""Markowitz: QP con cvxpy. Con y sin restriccion de no negatividad."""
+"""Markowitz: QP con cvxpy. Con y sin restriccion de no negatividad.
+
+Tambien expone `simulate_random_portfolios` para la nube de 10k portafolios
+aleatorios que pide la spec (Dirichlet si no-negativo; Normal normalizado si no).
+"""
 from __future__ import annotations
 
 import logging
@@ -52,3 +56,35 @@ def efficient_frontier(
     ms = max(points, key=lambda p: p["sharpe"]) if points else mv
 
     return {"points": points, "min_var": mv, "max_sharpe": ms}
+
+
+def simulate_random_portfolios(
+    mu: np.ndarray,
+    cov: np.ndarray,
+    n: int = 10000,
+    non_negative: bool = True,
+    rf_daily: float = 0.0,
+    seed: int = 0,
+) -> list[dict]:
+    """Genera n portafolios aleatorios para la nube (ret, vol, sharpe).
+
+    - non_negative=True: Dirichlet(alpha=1) (uniforme sobre el simplex).
+    - non_negative=False: Normal(0, 0.3) normalizado a suma=1 (permite cortos).
+    """
+    rng = np.random.default_rng(seed)
+    k = len(mu)
+    if non_negative:
+        weights = rng.dirichlet(np.ones(k), size=n)
+    else:
+        raw = rng.normal(0.0, 0.3, size=(n, k))
+        weights = raw / raw.sum(axis=1, keepdims=True)
+
+    rets = weights @ mu
+    vols = np.sqrt(np.einsum("ij,jk,ik->i", weights, cov, weights))
+    sharpes = np.where(vols > 0, (rets - rf_daily) / vols, 0.0)
+    out: list[dict] = []
+    for i in range(n):
+        out.append(
+            {"ret": float(rets[i]), "vol": float(vols[i]), "sharpe": float(sharpes[i])}
+        )
+    return out

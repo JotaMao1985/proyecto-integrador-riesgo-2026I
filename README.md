@@ -12,31 +12,32 @@ API FastAPI con persistencia SQLite, modelo de machine learning servido vía Sin
 
 ## Arquitectura en 5 capas
 
-1. **Datos y persistencia** — ingesta desde yfinance + FRED, persistencia en SQLite vía SQLAlchemy ORM, cache transparente (TTL configurable).
-2. **Análisis clásico** — indicadores técnicos, rendimientos, volatilidad EWMA + 3 modelos GARCH (incluido EGARCH/GJR), CAPM, VaR (3 métodos) + CVaR + backtesting de Kupiec, Markowitz QP con y sin restricción de no-negatividad.
-3. **Renta fija y derivados** — curva FRED + ajuste Nelson-Siegel, duración Macaulay/modificada, convexidad, Black-Scholes europeo + 5 Greeks, paridad put-call, stress testing con 4 escenarios.
-4. **Machine Learning** — pipeline `train.py → joblib → load → predict` con patrón Singleton vía lifespan de FastAPI. Cada predicción se persiste en `PredictionLog`. Propósito: clasificación binaria de dirección next-day.
-5. **Infraestructura** — pytest + TestClient (37 tests), Docker multi-stage, deploy en Render, GitHub Actions CI con `pytest` + build de imagen.
+1. **Datos y persistencia** — ingesta desde yfinance + FRED, persistencia en SQLite vía SQLAlchemy ORM, cache transparente (TTL configurable). 5 tablas: `Asset`, `Price`, `Portfolio`, `PredictionLog`, `SignalLog`.
+2. **Análisis clásico** — indicadores técnicos, rendimientos, volatilidad EWMA + 4 modelos GARCH (ARCH(1), GARCH(1,1), EGARCH, GJR), CAPM, VaR (3 métodos) + CVaR + backtesting de Kupiec, Markowitz QP con y sin no-negatividad **+ nube Monte Carlo de 10k portafolios**.
+3. **Renta fija y derivados** — curva FRED + ajuste Nelson-Siegel **por `scipy.optimize.least_squares`**, duración Macaulay/modificada, convexidad, Black-Scholes europeo + 5 Greeks, paridad put-call, stress testing con 5 escenarios (rate ±200 pb, market crash 20 %, market crash 30 %, vol spike σ×2, combined).
+4. **Machine Learning** — pipeline `train.py → joblib → load → predict` con patrón Singleton vía lifespan de FastAPI. Cada predicción se persiste en `PredictionLog` (campos `input_features`, `prediction`, `probability`, `actual`, `timestamp`). Endpoint `POST /predict/{log_id}/actual` para back-fill y monitoreo de drift.
+5. **Infraestructura** — pytest + TestClient (62 tests), CORS configurable, Docker multi-stage con purga de artefactos, deploy en Render, GitHub Actions CI con `pytest` + build de imagen.
 
 ## Endpoints (16+ rutas)
 
 ```text
 GET    /health
 GET    /activos
-GET    /precios/{ticker}
+GET    /precios/{ticker}              ?start=YYYY-MM-DD&end=YYYY-MM-DD
 GET    /rendimientos/{ticker}
 GET    /indicadores/{ticker}
-GET    /volatilidad/{ticker}     ?ewma_lambda=0.94
+GET    /volatilidad/{ticker}          ?ewma_lambda=0.94
 POST   /var
 GET    /capm
-POST   /frontera-eficiente
-GET    /alertas
+POST   /frontera-eficiente            con n_random para nube Monte Carlo
+GET    /alertas                       ?rsi_overbought=70&rsi_oversold=30&bb_k=2.0
 GET    /macro
 GET    /curva-rendimiento
 POST   /bono/duracion
 POST   /opcion/precio
 POST   /stress
 POST   /predict
+POST   /predict/{log_id}/actual       back-fill para monitoreo de drift
 POST   /portafolios   GET /portafolios   GET/DELETE /portafolios/{id}
 ```
 
@@ -99,7 +100,7 @@ cd backend
 pytest tests/ -v
 ```
 
-**37 tests** cubriendo: indicadores, VaR + Kupiec, Black-Scholes + paridad, bono + duración, frontera eficiente, CRUD portafolios, Singleton del ML, endpoints con TestClient.
+**62 tests** cubriendo: indicadores, VaR + Kupiec, Black-Scholes + paridad, bono + duración, frontera eficiente + nube Monte Carlo, CRUD portafolios, Singleton del ML + back-fill de actual, stress con 5 escenarios spec-CIII, señales con umbrales configurables + persistencia en `signals_log`, CORS, filtros de fecha en `/precios`.
 
 ## Ejecutar con Docker
 
@@ -110,7 +111,7 @@ docker compose up --build
 
 El compose levanta el backend con volumen persistente para la BD. La imagen se construye en multi-stage sobre `python:3.11.9-slim-bookworm`.
 
-**Nota sobre el tamaño:** la spec sugiere < 200 MB; con `cvxpy + arch + scipy + statsmodels` la imagen final ronda los 700 MB. Es un tradeoff documentado entre rigor matemático (cvxpy resuelve QP exacto, arch ajusta GARCH propiamente) y peso de la imagen. Para una versión más ligera se puede sustituir cvxpy por una implementación manual con scipy.
+**Nota sobre el tamaño:** la spec sugiere < 200 MB; con `cvxpy + arch + scipy + statsmodels` la imagen final ronda los 600-700 MB tras la purga de `tests/`, `__pycache__/` y `*.pyc` en el stage runtime. Es un trade-off documentado a favor del rigor matemático: `cvxpy` resuelve el QP de Markowitz con `cp.quad_form` (formulación explícita y pedagógica que aparece en clase), `arch` ajusta GARCH/EGARCH/GJR correctamente con MLE, `scipy.optimize.least_squares` calibra Nelson-Siegel. Para una versión más ligera se podría reimplementar Markowitz con `scipy.optimize.minimize(SLSQP)` y reemplazar `arch` por un GARCH propio — perdiendo el contenido didáctico de las librerías canónicas.
 
 ## Deploy en Render
 
@@ -134,7 +135,8 @@ URL pública: *por configurar al momento del deploy*.
 - `Asset(ticker PK, name, sector, currency)`
 - `Price(id PK, ticker FK, date, close, volume, fetched_at)` con unique constraint `(ticker, date)`.
 - `Portfolio(id, name, holdings JSON, created_at)`.
-- `PredictionLog(id, ticker, features JSON, prediction, probability, model_version, ts)`.
+- `PredictionLog(id, ticker, input_features JSON, prediction, probability, actual nullable, model_version, timestamp)` — nombres alineados con spec CIII; `actual` permite back-fill para drift.
+- `SignalLog(id, timestamp, ticker, rule, value)` — persiste cada detección de `/alertas`.
 
 ## Validación con Pydantic v2
 
@@ -233,17 +235,31 @@ Este uso de IA es coherente con la política descrita en `Proyecto_Integrador_Ri
 
 ## Activos seleccionados
 
-Los 5 activos seed cubren sectores diversos:
+La selección es intencional: **cinco sectores no correlacionados** del S&P 500, todos con histórico largo, alta liquidez y reportes financieros sólidos. La diversificación sectorial garantiza que la frontera eficiente de Markowitz produzca portafolios con beneficios reales (covarianzas bajas entre pares como tech/energy o healthcare/financials), y que el stress testing muestre asimetrías interesantes entre activos defensivos (KO, JNJ) y procíclicos (JPM, XOM).
 
-| Ticker | Compañía | Sector |
-|---|---|---|
-| AAPL | Apple Inc. | Technology |
-| JPM | JPMorgan Chase & Co. | Financials |
-| XOM | Exxon Mobil Corp. | Energy |
-| JNJ | Johnson & Johnson | Healthcare |
-| KO | The Coca-Cola Company | Consumer Staples |
+| Ticker | Compañía | Sector | Por qué |
+|---|---|---|---|
+| AAPL | Apple Inc. | Technology | Mega-cap tech, beta ~1.2, sensible al ciclo y a tasas; modelo arquetípico de growth stock. |
+| JPM | JPMorgan Chase | Financials | Banca universal; beta ~1.1, sensible a la curva de tasas; complemento natural a renta fija. |
+| XOM | Exxon Mobil | Energy | Procíclico, alta correlación con commodities; comportamiento contrario a tech en regímenes de inflación. |
+| JNJ | Johnson & Johnson | Healthcare | Defensivo, beta ~0.6; estabiliza el portafolio en stress de mercado. |
+| KO | The Coca-Cola Co. | Consumer Staples | Defensivo clásico, dividendos consistentes; reduce drawdowns en escenarios de recesión. |
 
-Benchmark: **SPY** (S&P 500 ETF).
+Benchmark: **SPY** (S&P 500 ETF) — referencia para CAPM (Beta, Alpha de Jensen) y para Rf vía FRED DGS3MO.
+
+## Decisiones de implementación
+
+Resumen de elecciones que divergen de un read-literal de la spec; cada una documentada con justificación pedagógica. Detalle completo en [PLAN_AUDITORIA.md](PLAN_AUDITORIA.md).
+
+| Decisión | Spec literal | Implementación | Justificación |
+|---|---|---|---|
+| **Markowitz QP** | <200 MB en Docker | Mantener `cvxpy` (~700 MB) | `cp.quad_form` es la formulación canónica que se enseña en clase; alternativa SLSQP perdería valor pedagógico. |
+| **PredictionLog** | Campos `input_features`, `timestamp`, `actual` (nullable) | Esquema spec-compliant + endpoint `POST /predict/{log_id}/actual` | Habilita monitoreo de drift como bonificación accesible. |
+| **Nube Markowitz** | "10,000 portafolios simulados" | Monte Carlo Dirichlet sobre el simplex (no-negativo) o Normal normalizado (con cortos) | Refleja "aleatorio" sin imponer una distribución artificial. |
+| **CORS** | No mencionado | `Settings.cors_origins` CSV; default `["*"]` solo en dev | Sin CORS el frontend deployado en otro dominio no consume el backend. |
+| **Stress** | 4 escenarios + combinado | 5 escenarios: `rate_shock` (+200 pb), `market_crash_20`, `market_crash_30`, `vol_spike` (σ×2), `combined` | La spec menciona "-20 % o -30 %"; exponemos ambos como escenarios independientes para que el estudiante pueda discutir el rango. |
+| **GARCH** | "ARCH(1), GARCH(1,1), EGARCH/GJR" | Los 4 modelos con selección por AIC | Estricto matching con spec; permite ver el efecto leverage explícitamente. |
+| **Nelson-Siegel** | `scipy.optimize.least_squares` | Migrado de `minimize(Nelder-Mead)` a `least_squares` con bounds (τ>0) | Cumple la spec textualmente; residuos vectoriales son numéricamente más estables. |
 
 ## Docente
 

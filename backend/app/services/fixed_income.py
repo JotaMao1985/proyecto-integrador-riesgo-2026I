@@ -1,10 +1,14 @@
-"""Renta fija: Nelson-Siegel + duracion/convexidad."""
+"""Renta fija: Nelson-Siegel + duracion/convexidad.
+
+Spec CIII exige ajuste por `scipy.optimize.least_squares` (MCO no lineal con
+residuos vectoriales), no por minimizacion escalar tipo Nelder-Mead.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.optimize import minimize
+from scipy.optimize import least_squares
 
 
 @dataclass(frozen=True)
@@ -23,16 +27,20 @@ def nelson_siegel(t: np.ndarray, p: NSParams) -> np.ndarray:
 
 
 def fit_ns(maturities: np.ndarray, yields: np.ndarray) -> tuple[NSParams, float, np.ndarray]:
-    """Ajusta NS por MCO no lineal. Devuelve params, RMSE y fitted."""
-    def loss(x: np.ndarray) -> float:
+    """Ajusta NS via scipy.optimize.least_squares. Devuelve params, RMSE y fitted."""
+
+    def residuals(x: np.ndarray) -> np.ndarray:
         b0, b1, b2, tau = x
-        if tau <= 0:
-            return 1e6
-        fit = nelson_siegel(maturities, NSParams(b0, b1, b2, tau))
-        return float(np.mean((fit - yields) ** 2))
+        # tau debe ser > 0; least_squares lo respeta con bounds.
+        return nelson_siegel(maturities, NSParams(b0, b1, b2, tau)) - yields
 
     x0 = np.array([yields.mean(), -0.02, 0.02, 2.0])
-    res = minimize(loss, x0, method="Nelder-Mead", options={"xatol": 1e-7, "fatol": 1e-9})
+    # bounds: tau > 0; el resto libre.
+    lower = np.array([-np.inf, -np.inf, -np.inf, 1e-4])
+    upper = np.array([np.inf, np.inf, np.inf, np.inf])
+    res = least_squares(
+        residuals, x0, bounds=(lower, upper), xtol=1e-10, ftol=1e-10
+    )
     b0, b1, b2, tau = res.x
     params = NSParams(float(b0), float(b1), float(b2), float(tau))
     fitted = nelson_siegel(maturities, params)

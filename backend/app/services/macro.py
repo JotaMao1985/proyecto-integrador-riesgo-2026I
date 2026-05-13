@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 import requests
 
@@ -88,4 +88,4 @@ def fetch_yield_curve() -> tuple[list[float], list[float], str]:
 
 
 def now_iso() -> datetime:
-    return datetime.utcnow()
+    return datetime.now(timezone.utc)

@@ -9,7 +9,9 @@ import os
 from datetime import date
 
 import httpx
+import matplotlib.pyplot as plt
 import pandas as pd
+import seaborn as sns
 import streamlit as st
 
 API_BASE = os.environ.get("API_BASE", "http://localhost:8000")
@@ -111,6 +113,17 @@ with tabs[0]:
         ).set_index("date")
         st.line_chart(macd_df)
         st.caption("MACD vs senial.")
+    last_rsi = next((x for x in reversed(data["rsi_14"]) if x is not None), None)
+    last_close = data["close"][-1]
+    last_bbu = next((x for x in reversed(data["bb_upper"]) if x is not None), None)
+    if last_rsi is not None and last_bbu is not None:
+        st.info(
+            f"**Interpretacion** — Cierre actual de {sel_ticker}: {last_close:.2f}. "
+            f"RSI={last_rsi:.1f}: "
+            f"{'zona sobrecompra (>70), posible correccion' if last_rsi > 70 else 'zona sobreventa (<30), posible rebote' if last_rsi < 30 else 'zona neutra (30-70), sin senal extrema'}. "
+            f"Cierre {'por encima' if last_close > last_bbu else 'dentro o por debajo'} de la banda superior de Bollinger ({last_bbu:.2f}); "
+            f"la combinacion con cruces MACD validados es el motor de las reglas de `/alertas`."
+        )
 
 
 # 2. Rendimientos
@@ -127,6 +140,18 @@ with tabs[1]:
     with c2:
         st.write("**Estadisticas descriptivas:**")
         st.json(r["stats"])
+    stats = r["stats"]
+    jb_p = stats.get("jarque_bera_pvalue", 1.0)
+    skew = stats.get("skew", 0.0)
+    kurt = stats.get("kurtosis", 0.0)
+    st.info(
+        f"**Interpretacion** — Asimetria {skew:+.2f} (negativa = mas perdidas extremas que ganancias), "
+        f"curtosis exceso {kurt:+.2f} (>0 = colas pesadas vs Normal). "
+        f"Jarque-Bera p-valor = {jb_p:.4f}: "
+        f"{'rechazamos normalidad (colas no Gaussianas)' if jb_p < 0.05 else 'no rechazamos normalidad a 5 %'}. "
+        "Esto justifica usar log-rendimientos y, ante colas pesadas, VaR historico o Montecarlo "
+        "en vez del parametrico Normal."
+    )
 
 
 # 3. Volatilidad
@@ -141,6 +166,15 @@ with tabs[2]:
     st.line_chart(df)
     st.write(f"**Mejor modelo GARCH por AIC:** `{v['best_model']}`")
     st.dataframe(pd.DataFrame(v["garch_results"]))
+    ewma_last = v["ewma_sigma"][-1] if v["ewma_sigma"] else None
+    if ewma_last is not None:
+        st.info(
+            f"**Interpretacion** — Sigma EWMA actual = {ewma_last:.4f} (volatilidad diaria implicita ~ "
+            f"{ewma_last*100:.2f} %, anualizada ~ {ewma_last*(252**0.5)*100:.1f} %). "
+            f"EWMA es reactivo (lambda={lam}); GARCH agrega persistencia (efecto cluster). "
+            f"Si el mejor por AIC es `EGARCH` o `GJR`, hay evidencia de **leverage effect** "
+            "(las caidas elevan la volatilidad mas que las subidas equivalentes)."
+        )
 
 
 # 4. CAPM
@@ -150,6 +184,17 @@ with tabs[3]:
         cap = _get("/capm")
         st.write(f"**Rf diaria (FRED):** {cap['rf']:.6f} | **Benchmark:** {cap['benchmark']}")
         st.dataframe(pd.DataFrame(cap["results"]))
+        if cap.get("results"):
+            agresivos = [r for r in cap["results"] if r["beta"] > 1]
+            defensivos = [r for r in cap["results"] if r["beta"] < 1]
+            st.info(
+                f"**Interpretacion** — Rf anualizada desde FRED (DGS3MO) ~ "
+                f"{((1+cap['rf'])**252 - 1)*100:.2f} %. "
+                f"Activos con beta>1 ({len(agresivos)}) amplifican movimientos del mercado (agresivos); "
+                f"beta<1 ({len(defensivos)}) los amortiguan (defensivos). "
+                "El alpha de Jensen positivo indica retornos por encima de lo que el riesgo sistematico "
+                "explicaria; si es persistente, sugiere generacion de valor."
+            )
     except Exception as exc:
         st.warning(f"Necesita datos de SPY en BD. {exc}")
 
@@ -167,27 +212,72 @@ with tabs[4]:
             res = _post("/var", {"weights": weights, "confidence": confidence, "n_simulations": 10000})
             st.dataframe(pd.DataFrame(res["methods"]))
             st.caption("Kupiec: pasa si p-valor > 0.05.")
+            methods = res["methods"]
+            pass_methods = [m["method"] for m in methods if m["kupiec_pass"]]
+            best_method = max(methods, key=lambda m: m["kupiec_pvalue"])["method"]
+            st.info(
+                f"**Interpretacion** — Bajo confianza {confidence:.0%}, el portafolio puede perder "
+                f"como minimo el VaR diario reportado en el {(1-confidence)*100:.0f} % peor de los dias. "
+                f"CVaR (Expected Shortfall) responde 'cuanto en promedio cuando excedemos el VaR'. "
+                f"Kupiec: {'metodos que pasan: ' + ', '.join(pass_methods) if pass_methods else 'ningun metodo pasa'}. "
+                f"Mejor calibrado por p-valor: **{best_method}**. "
+                "Si solo pasa el historico/Montecarlo, los retornos no son Normales."
+            )
 
 
 # 6. Markowitz
 with tabs[5]:
-    st.subheader("Frontera eficiente (QP)")
+    st.subheader("Frontera eficiente (QP) + nube Monte Carlo")
     cols = st.multiselect("Activos del portafolio", tickers, default=tickers[:4], key="mkw")
     nn = st.checkbox("Restriccion de no-negatividad", value=True)
+    n_random = st.slider("Portafolios aleatorios (Monte Carlo)", 0, 10000, 5000, step=500)
     if cols and st.button("Calcular frontera"):
-        with st.spinner("Resolviendo QP..."):
+        with st.spinner("Resolviendo QP + simulando portafolios..."):
             res = _post(
                 "/frontera-eficiente",
-                {"tickers": cols, "non_negative": nn, "n_points": 30},
+                {
+                    "tickers": cols,
+                    "non_negative": nn,
+                    "n_points": 30,
+                    "n_random": n_random,
+                },
             )
-        df = pd.DataFrame([{"vol": p["vol"], "ret": p["ret"]} for p in res["points"]])
-        st.scatter_chart(df, x="vol", y="ret")
+
+        fig, ax = plt.subplots(figsize=(8, 5))
+        if res.get("simulated"):
+            sims = pd.DataFrame(res["simulated"])
+            sc = ax.scatter(
+                sims["vol"], sims["ret"], c=sims["sharpe"],
+                cmap="viridis", alpha=0.25, s=8, label=f"Nube ({len(sims)})",
+            )
+            fig.colorbar(sc, ax=ax, label="Sharpe")
+        pts = pd.DataFrame([{"vol": p["vol"], "ret": p["ret"]} for p in res["points"]])
+        ax.plot(pts["vol"], pts["ret"], color="red", linewidth=2, label="Frontera eficiente")
+        mv = res["min_var"]
+        ms = res["max_sharpe"]
+        ax.scatter([mv["vol"]], [mv["ret"]], color="blue", marker="*", s=200, label="Min Var", zorder=5)
+        ax.scatter([ms["vol"]], [ms["ret"]], color="orange", marker="*", s=200, label="Max Sharpe", zorder=5)
+        ax.set_xlabel("Volatilidad")
+        ax.set_ylabel("Retorno esperado")
+        ax.legend(loc="best", fontsize=8)
+        ax.grid(True, alpha=0.3)
+        st.pyplot(fig)
+
         c1, c2 = st.columns(2)
-        c1.metric("Min Var - Retorno", f"{res['min_var']['ret']:.4f}")
-        c1.metric("Min Var - Vol", f"{res['min_var']['vol']:.4f}")
-        c2.metric("Max Sharpe", f"{res['max_sharpe']['sharpe']:.3f}")
+        c1.metric("Min Var - Retorno", f"{mv['ret']:.4f}")
+        c1.metric("Min Var - Vol", f"{mv['vol']:.4f}")
+        c2.metric("Max Sharpe", f"{ms['sharpe']:.3f}")
         st.write("**Pesos Min Var:**")
-        st.json(res["min_var"]["weights"])
+        st.json(mv["weights"])
+        st.info(
+            f"**Interpretacion** — La curva roja es la **frontera eficiente**: combinaciones optimas "
+            f"de los {len(cols)} activos en el sentido de Markowitz. La nube ({n_random} portafolios "
+            "aleatorios via Dirichlet sobre el simplex) muestra todo el espacio factible; nada queda a la "
+            f"izquierda de la frontera. **Min Var** ({mv['vol']:.4f}, {mv['ret']:.4f}) minimiza volatilidad sin "
+            f"restriccion de retorno objetivo; **Max Sharpe** ({ms['vol']:.4f}, {ms['ret']:.4f}) "
+            "maximiza retorno excedente por unidad de riesgo. Sin no-negatividad, la frontera se desplaza "
+            "y los pesos pueden ser cortos (negativos)."
+        )
 
 
 # 7. Senales
@@ -196,6 +286,15 @@ with tabs[6]:
     s = _get("/alertas")
     if s["signals"]:
         st.dataframe(pd.DataFrame(s["signals"]))
+        buys = sum(1 for x in s["signals"] if x.get("side") == "buy")
+        sells = sum(1 for x in s["signals"] if x.get("side") == "sell")
+        st.info(
+            f"**Interpretacion** — Detectadas {len(s['signals'])} senales hoy "
+            f"({buys} de compra, {sells} de venta). Reglas: RSI sobreventa/sobrecompra, "
+            "cruces de MACD vs signal y ruptura de bandas de Bollinger. Cada deteccion se "
+            "persiste en `signals_log` para auditoria y backtesting posterior. "
+            "Ajusta los umbrales en la URL del endpoint si quieres reglas mas estrictas."
+        )
     else:
         st.info("Sin senales activas en este momento.")
 
@@ -207,6 +306,13 @@ with tabs[7]:
     c1, c2 = st.columns(2)
     c1.metric("Rf anual", f"{m['rf']*100:.2f}%")
     c2.write(f"Fuente: `{m['rf_source']}`")
+    st.info(
+        f"**Interpretacion** — La tasa libre de riesgo es la referencia que separa la "
+        f"compensacion por tiempo (Rf) de la compensacion por asumir riesgo (premio de mercado). "
+        f"Se usa como entrada en CAPM, Black-Scholes y descuento de cupones del bono. "
+        f"Cache TTL 24 h: una caida de FRED no rompe la API gracias al fallback estatico. "
+        f"Fuente '{m['rf_source']}' indica si vino de FRED o del fallback."
+    )
 
 
 # 9. Renta fija
@@ -219,6 +325,12 @@ with tabs[8]:
     st.line_chart(df)
     st.write(f"**RMSE del ajuste NS:** {c['rmse']:.6f}")
     st.write(f"**Parametros:** beta0={c['ns_beta0']:.4f}, beta1={c['ns_beta1']:.4f}, beta2={c['ns_beta2']:.4f}, tau={c['ns_tau']:.4f}")
+    st.info(
+        f"**Interpretacion de NS** — beta0={c['ns_beta0']:.3f} es el nivel asintotico (tasas a muy largo plazo). "
+        f"beta1={c['ns_beta1']:.3f}: la pendiente; si negativa, la curva sube con la madurez (expansion). "
+        f"beta2={c['ns_beta2']:.3f}: la curvatura/joroba; tau={c['ns_tau']:.2f} fija donde aparece. "
+        f"Curva invertida (beta0+beta1<beta0) suele anticipar recesion."
+    )
 
     st.divider()
     st.subheader("Bono sintetico - duracion y convexidad")
@@ -247,6 +359,14 @@ with tabs[8]:
         m4.metric("Convexidad", f"{b['convexity']:.3f}")
         st.write("**Sensibilidad por shock:**")
         st.dataframe(pd.DataFrame(b["sensitivity"]).T)
+        st.info(
+            f"**Interpretacion** — Precio={b['price']:.2f}, "
+            f"D modificada={b['modified_duration']:.3f}: una subida de tasas de 1 % bajara el precio "
+            f"aproximadamente {b['modified_duration']*100:.2f} %. Convexidad={b['convexity']:.3f} corrige "
+            "esa estimacion lineal (curva 'D+C' siempre acerca al reprice exacto). "
+            "Para shocks grandes (>=100 bp), la diferencia entre `linear_D` y `exact` revela la "
+            "no-linealidad del precio."
+        )
 
 
 # 10. Opciones
@@ -278,18 +398,88 @@ with tabs[9]:
         st.write("**Greeks:**")
         st.json(o["greeks"])
         st.caption(f"Verificacion put-call parity: {o['parity_check']:.2e}")
+        g = o["greeks"]
+        st.info(
+            f"**Interpretacion** — Delta={g['delta']:+.3f}: cuanto cambia el precio de la opcion "
+            f"ante un movimiento unitario del subyacente (sirve para hedge); "
+            f"Gamma={g['gamma']:.4f}: la convexidad del delta. "
+            f"Vega={g['vega']:.3f}: sensibilidad a volatilidad implicita (1 %); "
+            f"Theta={g['theta']:+.3f}: erosion diaria del precio (time decay). "
+            f"Paridad call-put ≈ 0 ({o['parity_check']:.2e}) confirma consistencia interna del modelo "
+            "y permite implied vol via Newton-Raphson."
+        )
 
 
 # 11. Stress
 with tabs[10]:
-    st.subheader("Stress testing")
+    st.subheader("Stress testing - 5 escenarios spec CIII")
     cols = st.multiselect("Activos", tickers, default=tickers[:3], key="strs")
     if cols and st.button("Correr escenarios"):
         weights = {t: round(1.0 / len(cols), 4) for t in cols}
         weights[cols[-1]] = round(1.0 - sum(list(weights.values())[:-1]), 4)
         s = _post("/stress", {"weights": weights})
-        st.metric("VaR base", f"{s['base_var']:.4f}")
-        st.dataframe(pd.DataFrame(s["scenarios"]))
+        st.metric("VaR base (historico)", f"{s['base_var']:.4f}")
+
+        sc_df = pd.DataFrame(s["scenarios"]).set_index("name")
+
+        # (a) Bar chart de perdidas por escenario.
+        st.markdown("**Perdida anualizada del portafolio por escenario**")
+        fig1, ax1 = plt.subplots(figsize=(8, 3.5))
+        sc_df["portfolio_loss"].plot(
+            kind="bar", color="firebrick", ax=ax1, edgecolor="black"
+        )
+        ax1.set_ylabel("Perdida (fraccion)")
+        ax1.axhline(0, color="black", linewidth=0.5)
+        ax1.grid(True, axis="y", alpha=0.3)
+        ax1.tick_params(axis="x", rotation=20)
+        st.pyplot(fig1)
+        st.caption(
+            "El escenario `combined` integra los 3 shocks; tipicamente es el peor."
+        )
+
+        # (b) Comparacion VaR base vs VaR estresado.
+        st.markdown("**VaR base vs VaR estresado**")
+        fig2, ax2 = plt.subplots(figsize=(8, 3.5))
+        sc_df[["var_base", "var_stressed"]].plot(
+            kind="bar", ax=ax2, edgecolor="black",
+            color=["steelblue", "darkorange"],
+        )
+        ax2.set_ylabel("VaR (95 %)")
+        ax2.grid(True, axis="y", alpha=0.3)
+        ax2.tick_params(axis="x", rotation=20)
+        ax2.legend(["Base", "Estresado"])
+        st.pyplot(fig2)
+        st.caption(
+            "Bajo cualquier escenario adverso el VaR estresado debe ser mayor que el base."
+        )
+
+        # (c) Heatmap activo x escenario (sensibilidad).
+        st.markdown("**Sensibilidad por activo (contribucion al impacto)**")
+        sens_df = pd.DataFrame(
+            {sc["name"]: sc["sensitivity_by_asset"] for sc in s["scenarios"]}
+        )
+        fig3, ax3 = plt.subplots(figsize=(8, max(3, 0.4 * len(sens_df) + 2)))
+        sns.heatmap(
+            sens_df, annot=True, fmt=".3f", cmap="RdBu_r", center=0,
+            cbar_kws={"label": "Contribucion"}, ax=ax3,
+        )
+        ax3.set_xlabel("Escenario")
+        ax3.set_ylabel("Activo")
+        st.pyplot(fig3)
+        st.caption(
+            "Valores rojos: el activo amplifica el shock; azules: lo amortigua."
+        )
+
+        with st.expander("Tabla completa"):
+            st.dataframe(sc_df)
+        peor = sc_df["portfolio_loss"].idxmin()
+        st.info(
+            f"**Interpretacion** — El escenario mas adverso es `{peor}` con perdida estimada de "
+            f"{sc_df.loc[peor, 'portfolio_loss']*100:+.2f} % anual. "
+            "La columna `sensitivity_by_asset` indica que activos amplifican el shock vs cuales lo "
+            "amortiguan, util para rebalancear el portafolio antes de eventos previstos. "
+            "Spec CIII exige 4 escenarios obligatorios + combinado; aqui implementamos los 5."
+        )
 
 
 # 12. ML
@@ -307,5 +497,13 @@ with tabs[11]:
             c2.metric("Probabilidad", f"{p['probability']:.2%}")
             c3.metric("Version", p["model_version"])
             st.write("**Features usadas:**", p["features_used"])
+            st.info(
+                f"**Interpretacion** — El modelo es un GradientBoostingClassifier sobre {len(p['features_used'])} "
+                f"features tecnicas (lags de retornos, EWMA, RSI, MACD, ratio EMA). El patron Singleton garantiza "
+                "que el `.joblib` se carga UNA vez al arrancar la app (verificable en logs del backend) y "
+                f"cada inferencia toma <100 ms. Esta llamada se registro en `prediction_log` con id={p.get('log_id', 'n/a')}; "
+                "puedes hacer back-fill del valor real con `POST /predict/{log_id}/actual` "
+                "para habilitar monitoreo de drift."
+            )
         except Exception as exc:
             st.error(f"Error: {exc}")

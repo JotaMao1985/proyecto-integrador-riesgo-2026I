@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Iterable
 
 import pandas as pd
@@ -75,7 +75,8 @@ def _is_cache_stale(db: Session, ticker: str, end: date) -> bool:
     if last is None:
         return True
     ttl = timedelta(minutes=settings.cache_ttl_minutes)
-    return (datetime.utcnow() - datetime.combine(last, datetime.min.time())) > ttl
+    last_dt = datetime.combine(last, datetime.min.time(), tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - last_dt) > ttl
 
 
 def _refresh_from_yfinance(db: Session, ticker: str, start: date, end: date) -> int:

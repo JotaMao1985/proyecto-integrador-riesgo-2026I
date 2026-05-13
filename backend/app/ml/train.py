@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import joblib
@@ -100,7 +100,7 @@ def train(ticker: str | None = None) -> Path:
         "cv_f1": float(np.mean(f1s)),
         "cv_roc_auc": float(np.nanmean(aucs)),
         "model_version": MODEL_VERSION,
-        "trained_at": datetime.utcnow().isoformat(timespec="seconds"),
+        "trained_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
 
     out = Path(__file__).resolve().parent / "model.joblib"

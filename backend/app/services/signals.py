@@ -1,41 +1,64 @@
-"""Senales de compra/venta a partir de indicadores."""
+"""Senales de compra/venta a partir de indicadores tecnicos (criterio 1)."""
 from __future__ import annotations
 
-from datetime import date
+from dataclasses import dataclass
 
 import pandas as pd
 
 from app.models.schemas import SignalItem
-from app.services.indicators import all_indicators
+from app.services.indicators import all_indicators, bollinger
 
 
-def detect_signals(ticker: str, close: pd.Series, as_of: date | None = None) -> list[SignalItem]:
-    """Reglas clasicas: RSI sobrecompra/sobreventa, cruce MACD, ruptura Bollinger."""
+@dataclass(frozen=True)
+class SignalThresholds:
+    """Parametros configurables de las reglas de senales."""
+
+    rsi_overbought: float = 70.0
+    rsi_oversold: float = 30.0
+    bb_k: float = 2.0
+
+
+def detect_signals(
+    ticker: str,
+    close: pd.Series,
+    thresholds: SignalThresholds | None = None,
+) -> list[SignalItem]:
+    """Reglas: RSI sobrecompra/sobreventa, cruce MACD, ruptura Bollinger."""
+    th = thresholds or SignalThresholds()
     if close.empty or len(close) < 30:
         return []
 
     ind = all_indicators(close)
-    last_idx = close.index[-1]
-    prev_idx = close.index[-2]
+    # Recomputar Bollinger si bb_k no es el default.
+    if th.bb_k != 2.0:
+        bb_up, _bb_mid, bb_lo = bollinger(close, k=th.bb_k)
+        ind["bb_upper"] = bb_up
+        ind["bb_lower"] = bb_lo
 
     signals: list[SignalItem] = []
 
     rsi_last = ind["rsi_14"].iloc[-1]
     if pd.notna(rsi_last):
-        if rsi_last < 30:
+        if rsi_last < th.rsi_oversold:
             signals.append(
                 SignalItem(
-                    ticker=ticker, rule="rsi_oversold", side="buy",
-                    strength=float((30 - rsi_last) / 30),
-                    note=f"RSI={rsi_last:.1f} bajo 30",
+                    ticker=ticker,
+                    rule="rsi_oversold",
+                    side="buy",
+                    strength=float((th.rsi_oversold - rsi_last) / th.rsi_oversold),
+                    note=f"RSI={rsi_last:.1f} bajo {th.rsi_oversold:g}",
                 )
             )
-        elif rsi_last > 70:
+        elif rsi_last > th.rsi_overbought:
             signals.append(
                 SignalItem(
-                    ticker=ticker, rule="rsi_overbought", side="sell",
-                    strength=float((rsi_last - 70) / 30),
-                    note=f"RSI={rsi_last:.1f} sobre 70",
+                    ticker=ticker,
+                    rule="rsi_overbought",
+                    side="sell",
+                    strength=float(
+                        (rsi_last - th.rsi_overbought) / (100 - th.rsi_overbought)
+                    ),
+                    note=f"RSI={rsi_last:.1f} sobre {th.rsi_overbought:g}",
                 )
             )
 

@@ -4,10 +4,15 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models.schemas import FrontierOut, FrontierRequest, PortfolioPoint
+from app.models.schemas import (
+    FrontierOut,
+    FrontierRequest,
+    PortfolioPoint,
+    RandomPortfolioPoint,
+)
 from app.services.data import get_prices
 from app.services.macro import get_rf_daily
-from app.services.portfolio import efficient_frontier
+from app.services.portfolio import efficient_frontier, simulate_random_portfolios
 from app.services.returns import log_returns
 
 router = APIRouter(tags=["portafolios"])
@@ -41,6 +46,18 @@ async def frontera(req: FrontierRequest, db: Session = Depends(get_db)) -> Front
         mu=mu, cov=cov, n_points=req.n_points, non_negative=req.non_negative, rf_daily=rf_daily
     )
 
+    simulated_raw = (
+        simulate_random_portfolios(
+            mu=mu,
+            cov=cov,
+            n=req.n_random,
+            non_negative=req.non_negative,
+            rf_daily=rf_daily,
+        )
+        if req.n_random > 0
+        else []
+    )
+
     def _to_point(d: dict) -> PortfolioPoint:
         w = {cols[i]: float(d["weights"][i]) for i in range(len(cols))}
         return PortfolioPoint(ret=d["ret"], vol=d["vol"], sharpe=d["sharpe"], weights=w)
@@ -50,4 +67,5 @@ async def frontera(req: FrontierRequest, db: Session = Depends(get_db)) -> Front
         points=[_to_point(p) for p in result["points"]],
         min_var=_to_point(result["min_var"]),
         max_sharpe=_to_point(result["max_sharpe"]),
+        simulated=[RandomPortfolioPoint(**s) for s in simulated_raw],
     )

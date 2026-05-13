@@ -47,6 +47,48 @@ def test_predict_endpoint_logs_to_db(client, seed_synthetic):
     assert body["prediction"] in (0, 1)
     assert 0 <= body["probability"] <= 1
     assert body["model_version"] == "test-1.0"
+    assert "log_id" in body and isinstance(body["log_id"], int)
+    assert "timestamp" in body
+
+
+def test_predict_persists_input_features_column(client, seed_synthetic, test_db):
+    """Verifica que la columna nueva input_features se llena correctamente."""
+    from app.models.db_models import PredictionLog
+
+    ml_pred.reset_predictor()
+    ml_pred._predictor = _fake_predictor()
+    r = client.post("/predict", json={"ticker": "AAPL", "lookback_days": 250})
+    assert r.status_code == 200
+    log_id = r.json()["log_id"]
+    log = test_db.get(PredictionLog, log_id)
+    assert log is not None
+    assert log.input_features  # dict de features no vacio
+    assert log.actual is None  # nullable por defecto
+    assert log.timestamp is not None
+
+
+def test_actual_back_fill_endpoint(client, seed_synthetic, test_db):
+    """POST /predict/{id}/actual actualiza la fila."""
+    from app.models.db_models import PredictionLog
+
+    ml_pred.reset_predictor()
+    ml_pred._predictor = _fake_predictor()
+    r = client.post("/predict", json={"ticker": "AAPL", "lookback_days": 250})
+    log_id = r.json()["log_id"]
+
+    r2 = client.post(f"/predict/{log_id}/actual", json={"actual": 1.0})
+    assert r2.status_code == 200
+    assert r2.json()["actual"] == 1.0
+
+    log = test_db.get(PredictionLog, log_id)
+    assert log.actual == 1.0
+
+
+def test_actual_back_fill_404_si_id_inexistente(client, seed_synthetic):
+    ml_pred.reset_predictor()
+    ml_pred._predictor = _fake_predictor()
+    r = client.post("/predict/99999/actual", json={"actual": 1.0})
+    assert r.status_code == 404
 
 
 def test_predict_rejects_unknown_ticker(client, seed_synthetic):
