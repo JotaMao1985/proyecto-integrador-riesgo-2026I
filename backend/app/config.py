@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     ml_model_path: str = Field(default="app/ml/model.joblib")
     ml_default_ticker: str = Field(default="AAPL")
 
+    # T1.6: bootstrap del historico al arranque (en background, no bloquea).
+    bootstrap_on_startup: bool = Field(default=True)
+    bootstrap_years: int = Field(default=2, ge=1)
+
     # CORS: CSV de origenes permitidos. "*" abre todo (solo recomendado en dev).
     cors_origins: list[str] = Field(default_factory=lambda: ["*"])
 

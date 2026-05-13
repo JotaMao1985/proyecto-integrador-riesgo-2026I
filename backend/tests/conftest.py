@@ -20,15 +20,23 @@ from app.models.db_models import Asset, Price
 
 
 @pytest.fixture(autouse=True)
-def _reset_data_module_state():
-    """Aisla el estado modulo-level de `services.data` entre tests."""
+def _reset_module_state():
+    """Aisla estado modulo-level (cache, circuit, bootstrap) entre tests."""
+    from app.config import settings
     from app.services import data as data_mod
+    from app.status import BOOTSTRAP_STATE
 
+    # Desactivar bootstrap automatico: los tests no deben tocar internet.
+    original_bootstrap = settings.bootstrap_on_startup
+    settings.bootstrap_on_startup = False
     data_mod._circuit_state.clear()
     data_mod.reset_cache_stats()
+    BOOTSTRAP_STATE.clear()
+    BOOTSTRAP_STATE["state"] = "pending"
     yield
     data_mod._circuit_state.clear()
     data_mod.reset_cache_stats()
+    settings.bootstrap_on_startup = original_bootstrap
 
 
 @pytest.fixture(scope="function")

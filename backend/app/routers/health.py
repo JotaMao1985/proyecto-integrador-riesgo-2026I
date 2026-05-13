@@ -9,6 +9,7 @@ from app.decorators import log_latency
 from app.models.db_models import Price
 from app.models.schemas import HealthOut
 from app.services.data import CACHE_STATS
+from app.status import BOOTSTRAP_STATE
 
 router = APIRouter(tags=["health"])
 
@@ -16,7 +17,12 @@ router = APIRouter(tags=["health"])
 @router.get("/health", response_model=HealthOut, summary="Estado del servicio")
 @log_latency("GET /health")
 async def health(s: Settings = Depends(get_settings)) -> HealthOut:
-    return HealthOut(status="ok", env=s.env, app_name=s.app_name)
+    return HealthOut(
+        status="ok",
+        env=s.env,
+        app_name=s.app_name,
+        bootstrap_state=str(BOOTSTRAP_STATE.get("state", "pending")),
+    )
 
 
 @router.get(

@@ -379,6 +379,7 @@ class HealthOut(BaseModel):
     status: str
     env: str
     app_name: str
+    bootstrap_state: str = "pending"
 
     @model_validator(mode="after")
     def _status_known(self) -> "HealthOut":
