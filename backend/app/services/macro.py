@@ -3,8 +3,15 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from typing import Any
 
 import requests
+from tenacity import (
+    before_sleep_log,
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from app.config import settings
 
@@ -27,11 +34,22 @@ CURVE_SERIES: list[tuple[float, str]] = [
 ]
 
 
-def fetch_fred_latest(series_id: str) -> float | None:
-    """Obtiene el ultimo valor numerico no vacio de una serie de FRED."""
-    if not settings.fred_api_key:
-        logger.info("FRED_API_KEY vacia; uso fallback")
-        return None
+class FredRequestError(Exception):
+    """Error de FRED sin URL ni params (evita leak de api_key en logs)."""
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=10),
+    reraise=True,
+    before_sleep=before_sleep_log(logger, logging.WARNING),
+)
+def _fred_fetch_raw(series_id: str) -> dict[str, Any]:
+    """Llamada HTTP a FRED con backoff exponencial (1s, 2s, 4s).
+
+    Re-encapsula excepciones de `requests` para que tenacity y los logs
+    nunca incluyan la URL con `api_key=...` en query string.
+    """
     params = {
         "series_id": series_id,
         "api_key": settings.fred_api_key,
@@ -42,9 +60,25 @@ def fetch_fred_latest(series_id: str) -> float | None:
     try:
         resp = requests.get(FRED_BASE, params=params, timeout=10)
         resp.raise_for_status()
-        data = resp.json()
+        return resp.json()
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else "?"
+        raise FredRequestError(f"FRED HTTP {status} series={series_id}") from None
+    except requests.RequestException as exc:
+        raise FredRequestError(
+            f"FRED request failed series={series_id}: {type(exc).__name__}"
+        ) from None
+
+
+def fetch_fred_latest(series_id: str) -> float | None:
+    """Obtiene el ultimo valor numerico no vacio de una serie de FRED."""
+    if not settings.fred_api_key:
+        logger.info("FRED_API_KEY vacia; uso fallback")
+        return None
+    try:
+        data = _fred_fetch_raw(series_id)
     except Exception as exc:
-        logger.warning("FRED fallo series=%s err=%s", series_id, exc)
+        logger.warning("FRED fallo tras retries series=%s err=%s", series_id, exc)
         return None
     for obs in data.get("observations", []):
         v = obs.get("value")
