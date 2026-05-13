@@ -297,19 +297,28 @@ def _refresh_from_yfinance(
 
 
 def _read_prices_df(db: Session, ticker: str, start: date, end: date) -> pd.DataFrame:
-    rows = list(
-        db.scalars(
-            select(Price)
-            .where(Price.ticker == ticker, Price.date >= start, Price.date <= end)
-            .order_by(Price.date)
-        )
+    """Lee precios como DataFrame indexado por `date` (objetos `datetime.date`).
+
+    Vectorizado (T1.7): usa `pd.read_sql_query` para construir el frame
+    directamente desde el cursor, evitando la lista intermedia de dicts
+    que hacia O(N) Python overhead para datasets >500 filas.
+
+    SQLite vs Postgres: el dialecto SQLite devuelve `date` como `object/str`
+    via `read_sql_query`. Normalizamos a `datetime.date` para que el path
+    vectorizado sea indistinguible del ORM previo.
+    """
+    stmt = (
+        select(Price.date, Price.close, Price.volume)
+        .where(Price.ticker == ticker, Price.date >= start, Price.date <= end)
+        .order_by(Price.date)
     )
-    if not rows:
-        return pd.DataFrame(columns=["date", "close", "volume"]).set_index("date")
-    df = pd.DataFrame(
-        [{"date": r.date, "close": r.close, "volume": r.volume} for r in rows]
-    ).set_index("date")
-    return df
+    df = pd.read_sql_query(stmt, db.bind)
+    if df.empty:
+        return pd.DataFrame(columns=["date", "close", "volume"]).set_index(
+            pd.Index([], name="date")
+        )
+    df["date"] = pd.to_datetime(df["date"]).dt.date
+    return df.set_index("date")
 
 
 def insert_synthetic_prices(

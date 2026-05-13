@@ -34,6 +34,9 @@ class Asset(Base):
 
 class Price(Base):
     __tablename__ = "prices"
+    # UniqueConstraint genera un indice unico compuesto en (ticker, date)
+    # automaticamente en SQLite/Postgres; las queries WHERE ticker=? AND
+    # date BETWEEN ? AND ? lo aprovechan sin necesitar un Index adicional.
     __table_args__ = (UniqueConstraint("ticker", "date", name="uq_ticker_date"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

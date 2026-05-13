@@ -21,9 +21,10 @@ from app.models.db_models import Asset, Price
 
 @pytest.fixture(autouse=True)
 def _reset_module_state():
-    """Aisla estado modulo-level (cache, circuit, bootstrap) entre tests."""
+    """Aisla estado modulo-level (cache, circuit, bootstrap, FRED) entre tests."""
     from app.config import settings
     from app.services import data as data_mod
+    from app.services import macro as macro_mod
     from app.status import BOOTSTRAP_STATE
 
     # Desactivar bootstrap automatico: los tests no deben tocar internet.
@@ -31,11 +32,13 @@ def _reset_module_state():
     settings.bootstrap_on_startup = False
     data_mod._circuit_state.clear()
     data_mod.reset_cache_stats()
+    macro_mod.reset_fred_cache()
     BOOTSTRAP_STATE.clear()
     BOOTSTRAP_STATE["state"] = "pending"
     yield
     data_mod._circuit_state.clear()
     data_mod.reset_cache_stats()
+    macro_mod.reset_fred_cache()
     settings.bootstrap_on_startup = original_bootstrap
 
 

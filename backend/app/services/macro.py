@@ -2,13 +2,14 @@
 
 Material curricular:
 - M13 (ML/integracion APIs): cliente HTTP `requests` + tenacity para retry,
-  exception wrapper que evita filtrar `api_key` en logs.
+  exception wrapper que evita filtrar `api_key` en logs, cache TTL in-memory.
 - M5 (Pydantic settings): `settings.fred_api_key` viene de `.env`.
 - M7 (Renta fija): la curva de tesoros alimenta Nelson-Siegel y duracion/convexidad.
 """
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -43,6 +44,31 @@ CURVE_SERIES: list[tuple[float, str]] = [
 
 class FredRequestError(Exception):
     """Error de FRED sin URL ni params (evita leak de api_key en logs)."""
+
+
+# Cache TTL de FRED (T1.7): 10 min para hits; 60s para misses (None).
+# El TTL corto para None evita servir "no hay datos" durante 10 min cuando
+# FRED se recupera. Usa `time.monotonic` para evitar saltos de clock.
+_fred_cache: dict[str, tuple[float, float | None]] = {}
+_FRED_CACHE_TTL_SECONDS = 600
+_FRED_CACHE_NONE_TTL_SECONDS = 60
+
+
+def reset_fred_cache() -> None:
+    """Limpia el cache TTL. Pensado para tests."""
+    _fred_cache.clear()
+
+
+def _parse_observations(data: dict[str, Any]) -> float | None:
+    """Extrae el primer valor numerico valido y lo convierte de % a decimal."""
+    for obs in data.get("observations", []):
+        v = obs.get("value")
+        if v not in (None, "", "."):
+            try:
+                return float(v) / 100.0
+            except ValueError:
+                continue
+    return None
 
 
 @retry(
@@ -80,25 +106,37 @@ def _fred_fetch_raw(series_id: str) -> dict[str, Any]:
 def fetch_fred_latest(series_id: str) -> float | None:
     """Obtiene el ultimo valor numerico no vacio de una serie de FRED.
 
-    M13: integracion API externa con retry. FRED entrega porcentajes en %
-    (ej. "4.52"); aqui se convierten a decimal (0.0452).
+    M13: integracion API externa con retry + cache TTL in-memory (10 min).
+    FRED entrega porcentajes (ej. "4.52"); aqui se convierten a decimal (0.0452).
+    El cache incluye resultados `None` (FRED retorno serie sin valores
+    validos) para no martillar la API ante series problematicas.
     """
     if not settings.fred_api_key:
         logger.info("FRED_API_KEY vacia; uso fallback")
         return None
+
+    # Cache hit dentro de TTL: evita el HTTP request.
+    # TTL = 10 min para valores reales, 1 min para None (FRED puede recuperarse).
+    entry = _fred_cache.get(series_id)
+    if entry is not None:
+        cached_at, cached_value = entry
+        ttl = (
+            _FRED_CACHE_TTL_SECONDS
+            if cached_value is not None
+            else _FRED_CACHE_NONE_TTL_SECONDS
+        )
+        if time.monotonic() - cached_at <= ttl:
+            return cached_value
+
     try:
         data = _fred_fetch_raw(series_id)
     except Exception as exc:
         logger.warning("FRED fallo tras retries series=%s err=%s", series_id, exc)
         return None
-    for obs in data.get("observations", []):
-        v = obs.get("value")
-        if v not in (None, "", "."):
-            try:
-                return float(v) / 100.0  # FRED entrega en %
-            except ValueError:
-                continue
-    return None
+
+    value = _parse_observations(data)
+    _fred_cache[series_id] = (time.monotonic(), value)
+    return value
 
 
 def get_rf_annual() -> tuple[float, str]:
